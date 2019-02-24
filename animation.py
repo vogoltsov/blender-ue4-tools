@@ -37,6 +37,45 @@ class UE4_TOOLS_ANIMATION_PT_main(bpy.types.Panel):
 
         if context.mode == 'OBJECT':
             layout.operator(UE4_TOOLS_ANIMATION_OT_add_ue4_rig.bl_idname)
+        # draw different panel content based on current active object
+        active_object: bpy.types.Object = context.view_layer.objects.active
+        if active_object is not None:
+            if active_object.type == 'ARMATURE':
+                self.__draw_armature(context, active_object)
+
+    def __draw_armature(self, context: bpy.types.Context, active_object: bpy.types.Object):
+        if context.mode == 'OBJECT':
+            self.__draw_armature_in_object_mode(context, active_object)
+        elif context.mode == 'POSE':
+            self.__draw_armature_in_pose_mode(context, active_object)
+
+    def __draw_armature_in_object_mode(self, context: bpy.types.Context, active_object: bpy.types.Object):
+        if 'DeformBones' in active_object.pose.bone_groups:
+            self.layout.label(text='TODO', icon='SCRIPT')
+        else:
+            self.layout.label(text='Incompatible armature', icon='ERROR')
+            self.layout.label(text='Selected armature must')
+            self.layout.label(text='have a bone group called')
+            self.layout.label(text='\'DeformBones\' to be')
+            self.layout.label(text=' used with this addon.')
+            self.layout.operator(UE_TOOLS_ANIMATION_OT_add_deform_bones_group.bl_idname)
+        pass
+
+    def __draw_armature_in_pose_mode(self, context: bpy.types.Context, active_object: bpy.types.Object):
+        if 'DeformBones' not in active_object.pose.bone_groups:
+            self.layout.label(text='Incompatible armature', icon='ERROR')
+            self.layout.label(text='Selected armature must')
+            self.layout.label(text='have a bone group called')
+            self.layout.label(text='\'DeformBones\' to be')
+            self.layout.label(text=' used with this addon.')
+            self.layout.label(text='Select the bones to be')
+            self.layout.label(text='included in FBX export')
+            self.layout.label(text='and hit the button below.')
+            self.layout.operator(UE_TOOLS_ANIMATION_OT_set_deform_bones_group.bl_idname)
+            pass
+        else:
+            self.layout.label(text='TODO', icon='SCRIPT')
+            pass
 
 
 class UE4_TOOLS_ANIMATION_OT_add_ue4_rig(bpy.types.Operator):
@@ -122,6 +161,89 @@ class UE4_TOOLS_ANIMATION_OT_add_ue4_rig(bpy.types.Operator):
             bpy.ops.object.make_local(type='ALL')
         # return success
         return {'FINISHED'}
+
+
+class UE_TOOLS_ANIMATION_OT_add_deform_bones_group(bpy.types.Operator):
+    bl_idname = 'ue4_tools_animation.add_deform_bones_group'
+    bl_label = 'Auto-create deform bones'
+    bl_description = 'Add \'DeformBones\' bone group to current armature to be compatible with UE4 Tools.'
+
+    def execute(self, context: bpy.types.Context):
+        armature_object: bpy.types.Armature = context.view_layer.objects.active
+        # find all vertex groups with non-zero weights
+        vertex_group_names = self.__get_vertex_group_names(armature_object)
+        if len(vertex_group_names) == 0:
+            self.report({'ERROR'}, 'Could not find any matching vertex groups in child meshes')
+            return {'CANCELLED'}
+        # select only armature and enter pose mode
+        bpy.ops.object.select_all(action='DESELECT')
+        armature_object.select_set(True)
+        context.view_layer.objects.active = armature_object
+        bpy.ops.object.mode_set(mode='POSE')
+        # store visible bone layer visibility so it can be restored later
+        # and set all bone layers visible
+        visible_bone_layers = [len(armature_object.data.layers)]
+        for n in range(0, len(armature_object.data.layers)):
+            visible_bone_layers[n] = armature_object.data.layers[n]
+            armature_object.data.layers[n] = True
+        # select all bones for which there is a vertex group
+        # in any of the child meshes with the same name
+        bpy.ops.pose.select_all(action='DESELECT')
+        for b in armature_object.pose.bones:
+            if b.name in vertex_group_names:
+                b.bone.select = True
+        # create and assign 'DeformBones' group
+        if len(context.selected_pose_bones) > 0:
+            new_group_index: int = len(armature_object.pose.bone_groups)
+            bpy.ops.pose.group_assign(new_group_index)
+            armature_object.pose.bone_groups[new_group_index].name = 'DeformBones'
+        else:
+            self.report({'ERROR'}, "Any bones have vertex associated")
+        # restore layer visibility
+        for n in range(0, len(armature_object.data.layers)):
+            armature_object.data.layers[n] = visible_bone_layers[n]
+        # return to object mode
+        bpy.ops.object.mode_set(mode='OBJECT')
+        # return success
+        return {'FINISHED'}
+
+    def __get_vertex_group_names(self, armature_object: bpy.types.Object):
+        """Retrieves vertex group names from children meshes.
+
+        The operator iterates through all the bones and selects those
+        for which there is vertex group with the same name.
+        """
+        non_zero_vertex_groups = set()
+        for child in armature_object.children:
+            if child.type == 'MESH':
+                for vertex in child.data.vertices:
+                    for vertex_group in vertex.groups:
+                        if round(vertex_group.weight, 4) > .0000:
+                            non_zero_vertex_groups.add(vertex_group.group)
+        non_zero_vertex_group_names = set()
+        for child in armature_object.children:
+            if child.type == 'MESH':
+                for vertex_group in child.vertex_groups:
+                    if vertex_group.index in non_zero_vertex_groups:
+                        non_zero_vertex_group_names.add(vertex_group.name)
+        return non_zero_vertex_group_names
+
+
+class UE_TOOLS_ANIMATION_OT_set_deform_bones_group(bpy.types.Operator):
+    bl_idname = 'ue4_tools_animation.set_deform_bones_group'
+    bl_label = 'Set deform bones'
+    bl_description = 'Create \'DeformBones\' bone group based on currently selected bones.'
+
+    def execute(self, context: bpy.types.Context):
+        armature_object = context.view_layer.objects.active
+        if len(context.selected_pose_bones) > 0:
+            new_group_index: int = len(armature_object.pose.bone_groups)
+            bpy.ops.pose.group_assign(new_group_index)
+            armature_object.pose.bone_groups[new_group_index].name = 'DeformBones'
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, "You have to select bones first.")
+            return {'CANCELLED'}
 
 
 def register():
